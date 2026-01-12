@@ -52,13 +52,14 @@ from diffusers.optimization import get_scheduler
 from torchcfm.conditional_flow_matching import *
 from torchcfm.utils import *
 from torchcfm.models.models import *
+from termcolor import colored
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # dtype = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.FloatTensor
 
 ##################################
 ########## download the pusht data and put in the folder
-dataset_path = '../data/pusht/pusht_cchi_v7_replay.zarr'
+dataset_path = './pusht/pusht_cchi_v7_replay.zarr'
 
 obs_horizon = 1
 pred_horizon = 16
@@ -121,6 +122,7 @@ FM = ConditionalFlowMatcher(sigma=sigma)
 ########################################################################
 #### Train the model
 def train():
+    avg_loss_train_list = []
     for epoch in range(num_epochs):
         total_loss_train = 0.0
         for data in tqdm(dataloader):
@@ -177,7 +179,7 @@ def test():
     env = pusht.PushTImageEnv()
 
     test_start_seed = 1000
-    n_test = 500
+    n_test = 1
 
     ###### please choose the seed you want to test
     for epoch in range(n_test):
