@@ -1,0 +1,6 @@
+/data
+/examples/pusht_cchi_v7_replay.zarr.zip
+/examples/pusht_cchi_v7_replay.zarr
+*.pth
+venv_fm
+venv_fm_310

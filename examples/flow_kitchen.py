@@ -34,7 +34,8 @@
 import sys
 
 sys.dont_write_bytecode = True
-sys.path.append('../models')
+sys.path.append('../external/models')
+sys.path.append('../external')
 sys.path.append('../kitchen')
 import os
 import matplotlib.pyplot as plt
@@ -69,7 +70,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 ##################################
 ###### add Franka kitchen data to some folder
-dataset_path = "./kitchen/data"
+dataset_path = "../data/kitchen"
 
 obs_horizon = 1
 pred_horizon = 16
@@ -158,7 +159,7 @@ for epoch in range(num_epochs):
         torch.save({
             'noise_pred_net': noise_pred_net.state_dict(),
         }, PATH)
-         ema.restore(noise_pred_net.parameters())
+        ema.restore(noise_pred_net.parameters())
 
 sys.exit(0)
 

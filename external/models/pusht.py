@@ -456,7 +456,7 @@ class PushTEnv(gym.Env):
         self.goal_pose = np.array([256, 256, np.pi / 4])  # x, y, theta (in radians)
 
         # Add collision handeling
-        self.collision_handeler = self.space.add_collision_handler(0, 0)
+        self.collision_handeler = self.space.add_collision_handler(0,0)
         self.collision_handeler.post_solve = self._handle_collision
         self.n_contact_points = 0
 
@@ -691,7 +691,7 @@ class PushTImageDataset(torch.utils.data.Dataset):
                  obs_horizon: int,
                  action_horizon: int):
         # read from zarr dataset
-        dataset_root = zarr.open(dataset_path, 'r')
+        dataset_root = zarr.open(dataset_path, mode='r')
 
         # float32, [0,1], (N,96,96,3)
         train_image_data = dataset_root['data']['img'][:]

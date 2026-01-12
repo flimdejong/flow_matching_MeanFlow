@@ -34,7 +34,9 @@
 import sys
 
 sys.dont_write_bytecode = True
-sys.path.append('../models')
+sys.path.append('../external/models')
+sys.path.append('../external')
+# sys.path.append('../pusht')
 import numpy as np
 import torch
 import pusht
@@ -56,7 +58,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 ##################################
 ########## download the pusht data and put in the folder
-dataset_path = "pusht_cchi_v7_replay.zarr.zip"
+dataset_path = '../data/pusht/pusht_cchi_v7_replay.zarr'
 
 obs_horizon = 1
 pred_horizon = 16
@@ -165,8 +167,8 @@ def train():
 ########################################################################
 ###### test the model
 def test():
-    PATH = './flow_ema_03000.pth'
-    state_dict = torch.load(PATH, map_location='cuda')
+    PATH = './flow_pusht.pth'
+    state_dict = torch.load(PATH, map_location='cpu')
     ema_nets = nets
     ema_nets.vision_encoder.load_state_dict(state_dict['vision_encoder'])
     ema_nets.noise_pred_net.load_state_dict(state_dict['noise_pred_net'])
@@ -233,7 +235,7 @@ def test():
                     end = start + action_horizon
                     action = action_pred[start:end, :]
 
-                    # x_img = x_img[0, :].permute((1, 2, 0))
+                    x_img = x_img[0, :].permute((1, 2, 0))
                     # plot_trajectory(x0[0].detach().cpu().numpy(), vt[0].detach().cpu().numpy(),
                     #                 action_pred,
                     #                 x_img.detach().cpu().numpy())
@@ -257,7 +259,15 @@ def test():
                         if step_idx > max_steps:
                             done = True
                         if done:
+                            import imageio
+                            # After your loop ends:
+                            print(f'Score: {max(rewards)}')
+                            # Save video with imageio
+                            imageio.mimsave('vis_test.mp4', imgs, fps=30)
+                            print("Video saved to vis_test.mp4")
                             break
+
+    
 
 
 if __name__ == '__main__':

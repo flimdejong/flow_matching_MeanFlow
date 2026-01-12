@@ -9,7 +9,7 @@ diffusers
 tqdm
 gym
 pygame
-pymunk
+pymunk==6.11.1
 shapely
 opencv-python
 scikit-image
