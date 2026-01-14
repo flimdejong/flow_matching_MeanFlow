@@ -278,7 +278,10 @@ def test():
                         if done:
                             import imageio
                             print(f'Score: {max(rewards)}')
-                            imageio.mimsave('vis_test.mp4', imgs, fps=30)
+                            writer = imageio.get_writer('vis_test.mp4', fps=30, codec='libx264', pixelformat='yuv420p')
+                            for img in imgs:
+                                writer.append_data(img)
+                            writer.close()
                             print("Video saved to vis_test.mp4")
                             
                             # Process and visualize action distributions
