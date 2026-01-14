@@ -215,7 +215,7 @@ def test(max_steps=200, timehorizon=4, save_videos=True):
         seed = test_start_seed + epoch
         env.seed(seed)
 
-        for pp in range(3):
+        for pp in range(10):
             obs, info = env.reset()
             obs_deque = collections.deque(
                 [obs] * obs_horizon, maxlen=obs_horizon)
