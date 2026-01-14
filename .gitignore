@@ -6,3 +6,6 @@ venv_fm_310
 .DS_Store
 **/.DS_Store
 *.pth
+examples/tpush_cchi_v7_replay.zarr/
+examples/tpush_cchi_v7_replay.zarr.zip
+examples/pusht 
