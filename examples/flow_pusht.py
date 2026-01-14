@@ -79,6 +79,11 @@ VIDEO_DPI = 100  # Resolution: 100 = 1000x1000px, 150 = 1500x1500px, 50 = 500x50
 VIDEO_FIGSIZE = (10, 10)  # Figure size in inches (width, height)
 VIDEO_FPS = 8  # Frames per second for output videos
 
+##################################
+########## Grid Search Configuration
+GRID_SEARCH_MAX_STEPS = [100, 200, 300, 500]
+GRID_SEARCH_TIMEHORIZON = [1, 2, 3, 4, 5, 8, 10]
+
 # create dataset from file
 dataset = pusht.PushTImageDataset(
     dataset_path=dataset_path,
@@ -179,14 +184,21 @@ def train():
 
 ########################################################################
 ###### test the model
-def test():
+def test(max_steps=200, timehorizon=4, save_videos=True):
+    """
+    Test the model with specified parameters.
+    
+    Args:
+        max_steps: Maximum number of steps per episode
+        timehorizon: Number of flow matching steps (integration steps)
+        save_videos: Whether to save visualization videos
+    """
     PATH = './flow_pusht.pth'
     state_dict = torch.load(PATH, map_location='cpu')
     ema_nets = nets
     ema_nets.vision_encoder.load_state_dict(state_dict['vision_encoder'])
     ema_nets.noise_pred_net.load_state_dict(state_dict['noise_pred_net'])
 
-    max_steps = 100
     env = pusht.PushTImageEnv()
 
     test_start_seed = 1000
@@ -231,14 +243,13 @@ def test():
                         obs_features = torch.cat([image_features, x_pos], dim=-1)
                         obs_cond = obs_features.unsqueeze(0).flatten(start_dim=1)
 
-                        timehorion = 2
                         # Reset action_dist_iter for each flow-matching prediction
                         action_dist_iter = []
                         
-                        for i in range(timehorion):
+                        for i in range(timehorizon):
                             noise = torch.rand(1, pred_horizon, action_dim).to(device)
                             x0 = noise.expand(x_img.shape[0], -1, -1)
-                            timestep = torch.tensor([i / timehorion]).to(device)
+                            timestep = torch.tensor([i / timehorizon]).to(device)
 
                             if i == 0:
                                 # Store initial noise (unnormalized for visualization)
@@ -247,10 +258,10 @@ def test():
                                 action_dist_iter.append(noise_unnorm.copy())
                                 
                                 vt = nets['noise_pred_net'](x0, timestep, global_cond=obs_cond)
-                                traj = (vt * 1 / timehorion + x0)
+                                traj = (vt * 1 / timehorizon + x0)
                             else:
                                 vt = nets['noise_pred_net'](traj, timestep, global_cond=obs_cond)
-                                traj = (vt * 1 / timehorion + traj)
+                                traj = (vt * 1 / timehorizon + traj)
                             
                             # Store trajectory after each flow step (unnormalized)
                             traj_unnorm = pusht.unnormalize_data(
@@ -290,14 +301,14 @@ def test():
                         if step_idx > max_steps:
                             done = True
                         if done:
-                            episode_max_reward = max(rewards)
-                            episode_avg_reward = np.mean(rewards)
-                            all_episode_rewards.append(episode_avg_reward)
-                            print(f'Episode {len(all_episode_rewards):3d} | Max Reward: {episode_max_reward:6.3f} | Avg Reward: {episode_avg_reward:6.3f}')
+                            episode_final_reward = rewards[-1]
+                            
+                            all_episode_rewards.append(episode_final_reward)
+                            print(f'Episode {len(all_episode_rewards):3d} | Final Reward: {episode_final_reward:6.3f} ')
                             
                             # Update best episode if this one is better
-                            if episode_max_reward > best_reward:
-                                best_reward = episode_max_reward
+                            if episode_final_reward > best_reward:
+                                best_reward = episode_final_reward
                                 best_imgs = imgs.copy()
                                 best_action_dist_episode = [ad.copy() for ad in action_dist_episode]
                             break
@@ -305,23 +316,34 @@ def test():
     # Save best episode video and visualizations
     import imageio
     print(f'\n{"="*60}')
+    print(f'Config: max_steps={max_steps}, timehorizon={timehorizon}')
     print(f'Best Score: {best_reward:.3f}')
     print(f'Average Reward (all episodes): {np.mean(all_episode_rewards):.3f}')
     print(f'Std Dev Reward (all episodes): {np.std(all_episode_rewards):.3f}')
     print(f'{"="*60}')
     
-    # Save best reward video
-    writer = imageio.get_writer('vis_best.mp4', format='FFMPEG', fps=8, codec='libx264', pixelformat='yuv420p')
-    for img in best_imgs:
-        writer.append_data(img)
-    writer.close()
-    print("Best video saved to vis_best.mp4")
+    if save_videos:
+        # Save best reward video
+        writer = imageio.get_writer('vis_best.mp4', format='FFMPEG', fps=8, codec='libx264', pixelformat='yuv420p')
+        for img in best_imgs:
+            writer.append_data(img)
+        writer.close()
+        print("Best video saved to vis_best.mp4")
+        
+        # # Create overlay video with action points on environment frames
+        # create_overlay_video(best_imgs, best_action_dist_episode, action_horizon, obs_horizon)
+        
+        # # Process and visualize action distributions for best episode
+        # visualize_action_flow(best_action_dist_episode, action_horizon, obs_horizon)
     
-    # Create overlay video with action points on environment frames
-    create_overlay_video(best_imgs, best_action_dist_episode, action_horizon, obs_horizon)
-    
-    # Process and visualize action distributions for best episode
-    visualize_action_flow(best_action_dist_episode, action_horizon, obs_horizon)
+    return {
+        'max_steps': max_steps,
+        'timehorizon': timehorizon,
+        'best_reward': best_reward,
+        'avg_reward': np.mean(all_episode_rewards),
+        'std_reward': np.std(all_episode_rewards),
+        'all_rewards': all_episode_rewards
+    }
 
 
 def create_overlay_video(imgs, action_dist_episode, action_horizon, obs_horizon):
@@ -804,19 +826,91 @@ def create_static_comparison(executed_actions, colors, flow_step_names):
     plt.close(fig)
 
 
+def grid_search():
+    """
+    Run grid search over predefined max_steps and timehorizon values.
+    Saves results to a CSV file and prints summary.
+    """
+    import itertools
+    import csv
+    from datetime import datetime
+    
+    print("="*60)
+    print("GRID SEARCH MODE")
+    print(f"Max steps values: {GRID_SEARCH_MAX_STEPS}")
+    print(f"Timehorizon values: {GRID_SEARCH_TIMEHORIZON}")
+    print(f"Total combinations: {len(GRID_SEARCH_MAX_STEPS) * len(GRID_SEARCH_TIMEHORIZON)}")
+    print("="*60)
+    
+    results = []
+    
+    for max_steps, timehorizon in itertools.product(GRID_SEARCH_MAX_STEPS, GRID_SEARCH_TIMEHORIZON):
+        print(f"\n{'#'*60}")
+        print(f"Testing: max_steps={max_steps}, timehorizon={timehorizon}")
+        print(f"{'#'*60}")
+        
+        result = test(max_steps=max_steps, timehorizon=timehorizon, save_videos=False)
+        results.append(result)
+    
+    # Save results to CSV
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_filename = f'grid_search_results_{timestamp}.csv'
+    
+    with open(csv_filename, 'w', newline='') as csvfile:
+        fieldnames = ['max_steps', 'timehorizon', 'best_reward', 'avg_reward', 'std_reward']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        
+        writer.writeheader()
+        for r in results:
+            writer.writerow({
+                'max_steps': r['max_steps'],
+                'timehorizon': r['timehorizon'],
+                'best_reward': r['best_reward'],
+                'avg_reward': r['avg_reward'],
+                'std_reward': r['std_reward']
+            })
+    
+    print(f"\n{'='*60}")
+    print("GRID SEARCH COMPLETE")
+    print(f"Results saved to: {csv_filename}")
+    print("="*60)
+    
+    # Print summary table
+    print(f"\n{'Max Steps':<12} {'Timehorizon':<12} {'Best Reward':<12} {'Avg Reward':<12} {'Std Reward':<12}")
+    print("-" * 60)
+    for r in results:
+        print(f"{r['max_steps']:<12} {r['timehorizon']:<12} {r['best_reward']:<12.3f} {r['avg_reward']:<12.3f} {r['std_reward']:<12.3f}")
+    
+    # Find best configuration
+    best_result = max(results, key=lambda x: x['avg_reward'])
+    print(f"\nBest configuration (by avg reward):")
+    print(f"  max_steps={best_result['max_steps']}, timehorizon={best_result['timehorizon']}")
+    print(f"  Best Reward: {best_result['best_reward']:.3f}")
+    print(f"  Avg Reward: {best_result['avg_reward']:.3f}")
+    
+    return results
+
+
 if __name__ == '__main__':
-    # Check if an argument was provided
-    if len(sys.argv) < 2:
-        print("No argument provided. Please specify 'train', 'test', or 'print'.")
-        sys.exit(1)
-
-    arg = sys.argv[1].lower()
-
-    if arg == 'train':
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Flow Matching for PushT Task')
+    parser.add_argument('mode', choices=['train', 'test', 'unittest', 'gridsearch'],
+                        help='Mode to run: train, test, unittest, or gridsearch')
+    parser.add_argument('--max_steps', type=int, default=200,
+                        help='Maximum steps per episode (default: 200)')
+    parser.add_argument('--timehorizon', type=int, default=1,
+                        help='Number of flow matching integration steps (default: 4)')
+    parser.add_argument('--no_videos', action='store_true',
+                        help='Disable video saving during test')
+    
+    args = parser.parse_args()
+    
+    if args.mode == 'train':
         train()
-    elif arg == 'test':
-        test()
-    elif arg == 'unittest':
-        print("Uni Test Successful")
-    else:
-        print(f"Unknown argument '{arg}'. Please specify 'train', 'test', or 'print'.")
+    elif args.mode == 'test':
+        test(max_steps=args.max_steps, timehorizon=args.timehorizon, save_videos=not args.no_videos)
+    elif args.mode == 'gridsearch':
+        grid_search()
+    elif args.mode == 'unittest':
+        print("Unit Test Successful")
