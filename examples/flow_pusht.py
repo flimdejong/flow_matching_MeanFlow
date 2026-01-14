@@ -53,6 +53,9 @@ from torchcfm.conditional_flow_matching import *
 from torchcfm.utils import *
 from torchcfm.models.models import *
 from termcolor import colored
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+from matplotlib.animation import FuncAnimation, PillowWriter
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # dtype = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.FloatTensor
@@ -175,7 +178,7 @@ def test():
     ema_nets.vision_encoder.load_state_dict(state_dict['vision_encoder'])
     ema_nets.noise_pred_net.load_state_dict(state_dict['noise_pred_net'])
 
-    max_steps = 300
+    max_steps = 500
     env = pusht.PushTImageEnv()
 
     test_start_seed = 1000
@@ -195,6 +198,9 @@ def test():
             done = False
             step_idx = 0
 
+            # List to store all action distribution iterations for the episode
+            action_dist_episode = []
+
             with tqdm(total=max_steps, desc="Eval PushTImageEnv") as pbar:
                 while not done:
                     B = 1
@@ -207,26 +213,38 @@ def test():
                     # infer action
                     with torch.no_grad():
                         # get image features
-                        # t1 = time.time()
                         image_features = ema_nets['vision_encoder'](x_img)
                         obs_features = torch.cat([image_features, x_pos], dim=-1)
                         obs_cond = obs_features.unsqueeze(0).flatten(start_dim=1)
 
-                        timehorion = 1
+                        timehorion = 3
+                        # Reset action_dist_iter for each flow-matching prediction
+                        action_dist_iter = []
+                        
                         for i in range(timehorion):
                             noise = torch.rand(1, pred_horizon, action_dim).to(device)
                             x0 = noise.expand(x_img.shape[0], -1, -1)
                             timestep = torch.tensor([i / timehorion]).to(device)
 
                             if i == 0:
+                                # Store initial noise (unnormalized for visualization)
+                                noise_unnorm = pusht.unnormalize_data(
+                                    x0[0].detach().cpu().numpy(), stats=stats['action'])
+                                action_dist_iter.append(noise_unnorm.copy())
+                                
                                 vt = nets['noise_pred_net'](x0, timestep, global_cond=obs_cond)
                                 traj = (vt * 1 / timehorion + x0)
-
                             else:
                                 vt = nets['noise_pred_net'](traj, timestep, global_cond=obs_cond)
                                 traj = (vt * 1 / timehorion + traj)
-
-                    # print(time.time() - t1)
+                            
+                            # Store trajectory after each flow step (unnormalized)
+                            traj_unnorm = pusht.unnormalize_data(
+                                traj[0].detach().cpu().numpy(), stats=stats['action'])
+                            action_dist_iter.append(traj_unnorm.copy())
+                        
+                        # Store this prediction's flow iterations
+                        action_dist_episode.append(action_dist_iter)
 
                     naction = traj.detach().to('cpu').numpy()
                     naction = naction[0]
@@ -238,9 +256,6 @@ def test():
                     action = action_pred[start:end, :]
 
                     x_img = x_img[0, :].permute((1, 2, 0))
-                    # plot_trajectory(x0[0].detach().cpu().numpy(), vt[0].detach().cpu().numpy(),
-                    #                 action_pred,
-                    #                 x_img.detach().cpu().numpy())
 
                     # execute action_horizon number of steps
                     for j in range(len(action)):
@@ -262,14 +277,195 @@ def test():
                             done = True
                         if done:
                             import imageio
-                            # After your loop ends:
                             print(f'Score: {max(rewards)}')
-                            # Save video with imageio
                             imageio.mimsave('vis_test.mp4', imgs, fps=30)
                             print("Video saved to vis_test.mp4")
+                            
+                            # Process and visualize action distributions
+                            visualize_action_flow(action_dist_episode, action_horizon, obs_horizon)
                             break
 
+
+def visualize_action_flow(action_dist_episode, action_horizon, obs_horizon):
+    """
+    Visualize how actions evolve from noise to final predictions.
     
+    Args:
+        action_dist_episode: List of action_dist_iter for each prediction
+        action_horizon: Number of actions actually executed per prediction
+        obs_horizon: Observation horizon
+    """
+    # Step 3: Prune action_dist_episode to only keep executed actions
+    # Each prediction executes action_horizon actions starting from index (obs_horizon - 1)
+    start_idx = obs_horizon - 1
+    end_idx = start_idx + action_horizon
+    
+    pruned_episode = []
+    for action_dist_iter in action_dist_episode:
+        # action_dist_iter has shape: [num_flow_steps+1, pred_horizon, action_dim]
+        # where num_flow_steps+1 = 4 (noise + 3 flow steps)
+        pruned_iter = []
+        for step_data in action_dist_iter:
+            # Only keep the executed actions
+            pruned_iter.append(step_data[start_idx:end_idx, :])
+        pruned_episode.append(pruned_iter)
+    
+    # Step 4: Rearrange so each index belongs to one executed action
+    # Current: pruned_episode[prediction_idx][flow_step][action_in_horizon, dim]
+    # Target: executed_actions[action_idx][flow_step][dim]
+    
+    executed_actions = []
+    for pred_idx, pred_data in enumerate(pruned_episode):
+        num_flow_steps = len(pred_data)  # Should be 4 (noise + 3 steps)
+        num_actions_in_pred = pred_data[0].shape[0]  # action_horizon
+        
+        for action_in_pred in range(num_actions_in_pred):
+            action_flow_history = []
+            for flow_step in range(num_flow_steps):
+                action_flow_history.append(pred_data[flow_step][action_in_pred, :])
+            executed_actions.append(action_flow_history)
+    
+    # Step 5: Create GIF visualization
+    create_flow_animation(executed_actions)
+
+
+def create_flow_animation(executed_actions):
+    """
+    Create a GIF showing how actions evolve from noise to final values.
+    
+    Args:
+        executed_actions: List where each element is [flow_step][2D action coords]
+    """
+    num_actions = len(executed_actions)
+    num_flow_steps = len(executed_actions[0]) if num_actions > 0 else 0
+    
+    if num_actions == 0:
+        print("No actions to visualize")
+        return
+    
+    # Create color spectrum from yellow to purple
+    cmap = plt.cm.plasma  # Yellow to purple colormap
+    colors = [cmap(i / max(num_actions - 1, 1)) for i in range(num_actions)]
+    
+    # Set up the figure
+    fig, ax = plt.subplots(figsize=(10, 10))
+    
+    # Get data bounds for consistent axis limits
+    all_x = []
+    all_y = []
+    for action_history in executed_actions:
+        for step_data in action_history:
+            all_x.append(step_data[0])
+            all_y.append(step_data[1])
+    
+    x_margin = (max(all_x) - min(all_x)) * 0.1 + 1
+    y_margin = (max(all_y) - min(all_y)) * 0.1 + 1
+    x_lim = (min(all_x) - x_margin, max(all_x) + x_margin)
+    y_lim = (min(all_y) - y_margin, max(all_y) + y_margin)
+    
+    flow_step_names = ['Noise', 'Flow Step 1', 'Flow Step 2', 'Flow Step 3']
+    
+    def init():
+        ax.set_xlim(x_lim)
+        ax.set_ylim(y_lim)
+        ax.set_xlabel('Action Dimension 1', fontsize=12)
+        ax.set_ylabel('Action Dimension 2', fontsize=12)
+        ax.grid(True, alpha=0.3)
+        return []
+    
+    def animate(frame):
+        ax.clear()
+        ax.set_xlim(x_lim)
+        ax.set_ylim(y_lim)
+        ax.set_xlabel('Action Dimension 1', fontsize=12)
+        ax.set_ylabel('Action Dimension 2', fontsize=12)
+        ax.grid(True, alpha=0.3)
+        
+        flow_step = frame % num_flow_steps
+        ax.set_title(f'Action Flow Evolution - {flow_step_names[flow_step]}', fontsize=14)
+        
+        # Plot all actions at current flow step
+        for action_idx, action_history in enumerate(executed_actions):
+            x = action_history[flow_step][0]
+            y = action_history[flow_step][1]
+            ax.scatter(x, y, c=[colors[action_idx]], s=50, alpha=0.7, 
+                      edgecolors='black', linewidth=0.5)
+        
+        # Add colorbar legend
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(0, num_actions - 1))
+        sm.set_array([])
+        
+        # Draw trajectory lines connecting consecutive actions at this flow step
+        if num_actions > 1:
+            xs = [action_history[flow_step][0] for action_history in executed_actions]
+            ys = [action_history[flow_step][1] for action_history in executed_actions]
+            ax.plot(xs, ys, 'k-', alpha=0.2, linewidth=0.5)
+        
+        return []
+    
+    # Create animation - show each flow step for longer
+    frames_per_step = 30  # 30 frames per flow step
+    total_frames = num_flow_steps * frames_per_step
+    
+    def animate_extended(frame):
+        return animate(frame // frames_per_step)
+    
+    anim = FuncAnimation(fig, animate_extended, init_func=init, 
+                        frames=total_frames, interval=50, blit=False)
+    
+    # Save as GIF
+    writer = PillowWriter(fps=20)
+    anim.save('action_flow_evolution.gif', writer=writer)
+    print("GIF saved to action_flow_evolution.gif")
+    
+    plt.close(fig)
+    
+    # Also create a static comparison plot
+    create_static_comparison(executed_actions, colors, flow_step_names)
+
+
+def create_static_comparison(executed_actions, colors, flow_step_names):
+    """Create a static plot showing all flow steps side by side."""
+    num_flow_steps = len(executed_actions[0])
+    
+    fig, axes = plt.subplots(1, num_flow_steps, figsize=(5 * num_flow_steps, 5))
+    
+    # Get consistent axis limits
+    all_x = []
+    all_y = []
+    for action_history in executed_actions:
+        for step_data in action_history:
+            all_x.append(step_data[0])
+            all_y.append(step_data[1])
+    
+    x_margin = (max(all_x) - min(all_x)) * 0.1 + 1
+    y_margin = (max(all_y) - min(all_y)) * 0.1 + 1
+    x_lim = (min(all_x) - x_margin, max(all_x) + x_margin)
+    y_lim = (min(all_y) - y_margin, max(all_y) + y_margin)
+    
+    for step_idx, ax in enumerate(axes):
+        ax.set_xlim(x_lim)
+        ax.set_ylim(y_lim)
+        ax.set_title(flow_step_names[step_idx], fontsize=12)
+        ax.set_xlabel('Action Dim 1')
+        ax.set_ylabel('Action Dim 2')
+        ax.grid(True, alpha=0.3)
+        
+        for action_idx, action_history in enumerate(executed_actions):
+            x = action_history[step_idx][0]
+            y = action_history[step_idx][1]
+            ax.scatter(x, y, c=[colors[action_idx]], s=30, alpha=0.7,
+                      edgecolors='black', linewidth=0.3)
+        
+        # Draw trajectory
+        xs = [ah[step_idx][0] for ah in executed_actions]
+        ys = [ah[step_idx][1] for ah in executed_actions]
+        ax.plot(xs, ys, 'k-', alpha=0.2, linewidth=0.5)
+    
+    plt.tight_layout()
+    plt.savefig('action_flow_comparison.png', dpi=150)
+    print("Static comparison saved to action_flow_comparison.png")
+    plt.close(fig)
 
 
 if __name__ == '__main__':
