@@ -53,6 +53,8 @@ from torchcfm.conditional_flow_matching import *
 from torchcfm.utils import *
 from torchcfm.models.models import *
 from termcolor import colored
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend for rendering
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.animation import FuncAnimation, PillowWriter
@@ -70,6 +72,12 @@ action_dim = 2
 action_horizon = 8
 num_epochs = 3001
 vision_feature_dim = 514
+
+##################################
+########## Video Configuration
+VIDEO_DPI = 100  # Resolution: 100 = 1000x1000px, 150 = 1500x1500px, 50 = 500x500px
+VIDEO_FIGSIZE = (10, 10)  # Figure size in inches (width, height)
+VIDEO_FPS = 8  # Frames per second for output videos
 
 # create dataset from file
 dataset = pusht.PushTImageDataset(
@@ -178,11 +186,17 @@ def test():
     ema_nets.vision_encoder.load_state_dict(state_dict['vision_encoder'])
     ema_nets.noise_pred_net.load_state_dict(state_dict['noise_pred_net'])
 
-    max_steps = 500
+    max_steps = 100
     env = pusht.PushTImageEnv()
 
     test_start_seed = 1000
     n_test = 1
+
+    # Track best episode across all tests
+    best_reward = -float('inf')
+    best_imgs = None
+    best_action_dist_episode = None
+    all_episode_rewards = []  # Track all episodes for averaging
 
     ###### please choose the seed you want to test
     for epoch in range(n_test):
@@ -217,7 +231,7 @@ def test():
                         obs_features = torch.cat([image_features, x_pos], dim=-1)
                         obs_cond = obs_features.unsqueeze(0).flatten(start_dim=1)
 
-                        timehorion = 3
+                        timehorion = 2
                         # Reset action_dist_iter for each flow-matching prediction
                         action_dist_iter = []
                         
@@ -276,17 +290,162 @@ def test():
                         if step_idx > max_steps:
                             done = True
                         if done:
-                            import imageio
-                            print(f'Score: {max(rewards)}')
-                            writer = imageio.get_writer('vis_test.mp4', fps=30, codec='libx264', pixelformat='yuv420p')
-                            for img in imgs:
-                                writer.append_data(img)
-                            writer.close()
-                            print("Video saved to vis_test.mp4")
+                            episode_max_reward = max(rewards)
+                            episode_avg_reward = np.mean(rewards)
+                            all_episode_rewards.append(episode_avg_reward)
+                            print(f'Episode {len(all_episode_rewards):3d} | Max Reward: {episode_max_reward:6.3f} | Avg Reward: {episode_avg_reward:6.3f}')
                             
-                            # Process and visualize action distributions
-                            visualize_action_flow(action_dist_episode, action_horizon, obs_horizon)
+                            # Update best episode if this one is better
+                            if episode_max_reward > best_reward:
+                                best_reward = episode_max_reward
+                                best_imgs = imgs.copy()
+                                best_action_dist_episode = [ad.copy() for ad in action_dist_episode]
                             break
+
+    # Save best episode video and visualizations
+    import imageio
+    print(f'\n{"="*60}')
+    print(f'Best Score: {best_reward:.3f}')
+    print(f'Average Reward (all episodes): {np.mean(all_episode_rewards):.3f}')
+    print(f'Std Dev Reward (all episodes): {np.std(all_episode_rewards):.3f}')
+    print(f'{"="*60}')
+    
+    # Save best reward video
+    writer = imageio.get_writer('vis_best.mp4', format='FFMPEG', fps=8, codec='libx264', pixelformat='yuv420p')
+    for img in best_imgs:
+        writer.append_data(img)
+    writer.close()
+    print("Best video saved to vis_best.mp4")
+    
+    # Create overlay video with action points on environment frames
+    create_overlay_video(best_imgs, best_action_dist_episode, action_horizon, obs_horizon)
+    
+    # Process and visualize action distributions for best episode
+    visualize_action_flow(best_action_dist_episode, action_horizon, obs_horizon)
+
+
+def create_overlay_video(imgs, action_dist_episode, action_horizon, obs_horizon):
+    """
+    Create a video overlaying the final action trajectory on environment frames.
+    
+    Args:
+        imgs: List of environment render frames
+        action_dist_episode: List of action_dist_iter for each prediction
+        action_horizon: Number of actions executed per prediction
+        obs_horizon: Observation horizon
+    """
+    import imageio
+    import cv2
+    
+    # Extract final action predictions (last flow step) for each prediction
+    start_idx = obs_horizon - 1
+    end_idx = start_idx + action_horizon
+    
+    # Build a list of executed actions with their frame indices
+    # Each prediction covers action_horizon frames
+    executed_actions = []
+    for pred_idx, action_dist_iter in enumerate(action_dist_episode):
+        # Get the final flow step (last element contains the final prediction)
+        final_trajectory = action_dist_iter[-1]  # Shape: [pred_horizon, action_dim]
+        # Extract only the executed portion
+        executed_portion = final_trajectory[start_idx:end_idx, :]  # Shape: [action_horizon, 2]
+        executed_actions.append(executed_portion)
+    
+    # Generate unique colors for action points
+    num_predictions = len(executed_actions)
+    colors = generate_unique_colors(num_predictions * action_horizon)
+    
+    # The environment workspace is typically 512x512, frames are rendered at a different resolution
+    # We need to scale action coordinates to frame coordinates
+    frame_height, frame_width = imgs[0].shape[:2]
+    workspace_size = 512  # PushT workspace is 512x512
+    
+    scale_x = frame_width / workspace_size
+    scale_y = frame_height / workspace_size
+    
+    overlay_frames = []
+    
+    # Frame 0 is the initial state before any action
+    # Frames 1 to N correspond to actions taken
+    for frame_idx, img in enumerate(imgs):
+        # Create a copy to draw on
+        overlay_img = img.copy()
+        
+        # Determine which prediction and action this frame corresponds to
+        # Frame 0 is initial, frame 1 is after first action, etc.
+        if frame_idx == 0:
+            # Initial frame - show all upcoming actions from first prediction
+            if len(executed_actions) > 0:
+                trajectory = executed_actions[0]
+                for action_idx in range(len(trajectory)):
+                    x = int(trajectory[action_idx, 0] * scale_x)
+                    y = int(trajectory[action_idx, 1] * scale_y)
+                    # Clamp to frame bounds
+                    x = max(0, min(frame_width - 1, x))
+                    y = max(0, min(frame_height - 1, y))
+                    
+                    color_idx = action_idx
+                    color = tuple(int(c * 255) for c in colors[color_idx][:3])
+                    cv2.circle(overlay_img, (x, y), 4, color, -1)
+                    cv2.circle(overlay_img, (x, y), 4, (0, 0, 0), 1)
+                
+                # Draw trajectory line
+                for i in range(len(trajectory) - 1):
+                    x1 = int(trajectory[i, 0] * scale_x)
+                    y1 = int(trajectory[i, 1] * scale_y)
+                    x2 = int(trajectory[i + 1, 0] * scale_x)
+                    y2 = int(trajectory[i + 1, 1] * scale_y)
+                    x1, y1 = max(0, min(frame_width - 1, x1)), max(0, min(frame_height - 1, y1))
+                    x2, y2 = max(0, min(frame_width - 1, x2)), max(0, min(frame_height - 1, y2))
+                    cv2.line(overlay_img, (x1, y1), (x2, y2), (255, 255, 255), 1)
+        else:
+            # Determine which prediction this frame belongs to
+            action_step = frame_idx - 1  # 0-indexed action step
+            pred_idx = action_step // action_horizon
+            action_in_pred = action_step % action_horizon
+            
+            if pred_idx < len(executed_actions):
+                trajectory = executed_actions[pred_idx]
+                
+                # Draw all action points in this prediction's trajectory
+                for action_idx in range(len(trajectory)):
+                    x = int(trajectory[action_idx, 0] * scale_x)
+                    y = int(trajectory[action_idx, 1] * scale_y)
+                    x = max(0, min(frame_width - 1, x))
+                    y = max(0, min(frame_height - 1, y))
+                    
+                    color_idx = pred_idx * action_horizon + action_idx
+                    if color_idx < len(colors):
+                        color = tuple(int(c * 255) for c in colors[color_idx][:3])
+                    else:
+                        color = (255, 0, 0)
+                    
+                    # Highlight current action with larger circle
+                    if action_idx == action_in_pred:
+                        cv2.circle(overlay_img, (x, y), 8, color, -1)
+                        cv2.circle(overlay_img, (x, y), 8, (255, 255, 255), 2)
+                    else:
+                        cv2.circle(overlay_img, (x, y), 4, color, -1)
+                        cv2.circle(overlay_img, (x, y), 4, (0, 0, 0), 1)
+                
+                # Draw trajectory line
+                for i in range(len(trajectory) - 1):
+                    x1 = int(trajectory[i, 0] * scale_x)
+                    y1 = int(trajectory[i, 1] * scale_y)
+                    x2 = int(trajectory[i + 1, 0] * scale_x)
+                    y2 = int(trajectory[i + 1, 1] * scale_y)
+                    x1, y1 = max(0, min(frame_width - 1, x1)), max(0, min(frame_height - 1, y1))
+                    x2, y2 = max(0, min(frame_width - 1, x2)), max(0, min(frame_height - 1, y2))
+                    cv2.line(overlay_img, (x1, y1), (x2, y2), (255, 255, 255), 1)
+        
+        overlay_frames.append(overlay_img)
+    
+    # Save overlay video
+    writer = imageio.get_writer('vis_overlay.mp4', format='FFMPEG', fps=8, codec='libx264', pixelformat='yuv420p')
+    for frame in overlay_frames:
+        writer.append_data(frame)
+    writer.close()
+    print("Overlay video saved to vis_overlay.mp4")
 
 
 def visualize_action_flow(action_dist_episode, action_horizon, obs_horizon):
@@ -332,9 +491,30 @@ def visualize_action_flow(action_dist_episode, action_horizon, obs_horizon):
     create_flow_animation(executed_actions)
 
 
+def generate_unique_colors(num_colors):
+    """
+    Generate unique, visually distinct colors for each action point.
+    
+    Args:
+        num_colors: Number of unique colors needed
+    
+    Returns:
+        List of RGBA color tuples
+    """
+    # Use HSV color space for better distribution
+    colors = []
+    for i in range(num_colors):
+        hue = i / num_colors
+        saturation = 0.7 + 0.3 * ((i % 3) / 3)  # Vary saturation slightly
+        value = 0.8 + 0.2 * ((i % 5) / 5)  # Vary brightness slightly
+        rgb = mcolors.hsv_to_rgb([hue, saturation, value])
+        colors.append((*rgb, 0.8))  # Add alpha
+    return colors
+
+
 def create_flow_animation(executed_actions):
     """
-    Create a GIF showing how actions evolve from noise to final values.
+    Create MP4 videos showing how actions evolve from noise to final values.
     
     Args:
         executed_actions: List where each element is [flow_step][2D action coords]
@@ -346,12 +526,11 @@ def create_flow_animation(executed_actions):
         print("No actions to visualize")
         return
     
-    # Create color spectrum from yellow to purple
-    cmap = plt.cm.plasma  # Yellow to purple colormap
-    colors = [cmap(i / max(num_actions - 1, 1)) for i in range(num_actions)]
+    # Generate unique colors for each action point
+    colors = generate_unique_colors(num_actions)
     
-    # Set up the figure
-    fig, ax = plt.subplots(figsize=(10, 10))
+    # Set up the figure with configurable resolution
+    fig, ax = plt.subplots(figsize=VIDEO_FIGSIZE, dpi=VIDEO_DPI)
     
     # Get data bounds for consistent axis limits
     all_x = []
@@ -371,6 +550,7 @@ def create_flow_animation(executed_actions):
     def init():
         ax.set_xlim(x_lim)
         ax.set_ylim(y_lim)
+        ax.invert_yaxis()  # Origin at top-left
         ax.set_xlabel('Action Dimension 1', fontsize=12)
         ax.set_ylabel('Action Dimension 2', fontsize=12)
         ax.grid(True, alpha=0.3)
@@ -380,6 +560,7 @@ def create_flow_animation(executed_actions):
         ax.clear()
         ax.set_xlim(x_lim)
         ax.set_ylim(y_lim)
+        ax.invert_yaxis()  # Origin at top-left
         ax.set_xlabel('Action Dimension 1', fontsize=12)
         ax.set_ylabel('Action Dimension 2', fontsize=12)
         ax.grid(True, alpha=0.3)
@@ -387,16 +568,12 @@ def create_flow_animation(executed_actions):
         flow_step = frame % num_flow_steps
         ax.set_title(f'Action Flow Evolution - {flow_step_names[flow_step]}', fontsize=14)
         
-        # Plot all actions at current flow step
+        # Plot all actions at current flow step with unique colors
         for action_idx, action_history in enumerate(executed_actions):
             x = action_history[flow_step][0]
             y = action_history[flow_step][1]
-            ax.scatter(x, y, c=[colors[action_idx]], s=50, alpha=0.7, 
+            ax.scatter(x, y, c=[colors[action_idx]], s=50, 
                       edgecolors='black', linewidth=0.5)
-        
-        # Add colorbar legend
-        sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(0, num_actions - 1))
-        sm.set_array([])
         
         # Draw trajectory lines connecting consecutive actions at this flow step
         if num_actions > 1:
@@ -416,15 +593,170 @@ def create_flow_animation(executed_actions):
     anim = FuncAnimation(fig, animate_extended, init_func=init, 
                         frames=total_frames, interval=50, blit=False)
     
-    # Save as GIF
-    writer = PillowWriter(fps=20)
-    anim.save('action_flow_evolution.gif', writer=writer)
-    print("GIF saved to action_flow_evolution.gif")
+    # Save as MP4 instead of GIF
+    import imageio
+    
+    # Render frames and save with imageio
+    frames = []
+    for frame_idx in range(total_frames):
+        animate_extended(frame_idx)
+        fig.canvas.draw()
+        # Convert canvas to image (RGBA then drop alpha channel)
+        img = np.asarray(fig.canvas.buffer_rgba())
+        img = img[:, :, :3]  # Drop alpha channel
+        frames.append(img.copy())
+    
+    writer = imageio.get_writer('action_flow_evolution.mp4', format='FFMPEG', fps=VIDEO_FPS, codec='libx264', pixelformat='yuv420p')
+    for frame in frames:
+        writer.append_data(frame)
+    writer.close()
+    print("MP4 saved to action_flow_evolution.mp4")
     
     plt.close(fig)
     
+    # Create smooth interpolated animation
+    create_smooth_flow_animation(executed_actions, colors, x_lim, y_lim, flow_step_names)
+    
     # Also create a static comparison plot
     create_static_comparison(executed_actions, colors, flow_step_names)
+
+
+def create_smooth_flow_animation(executed_actions, colors, x_lim, y_lim, flow_step_names):
+    """
+    Create a smooth interpolated MP4 showing action distribution evolution.
+    
+    Args:
+        executed_actions: List where each element is [flow_step][2D action coords]
+        colors: Unique colors for each action point
+        x_lim: X-axis limits
+        y_lim: Y-axis limits
+        flow_step_names: Names for each flow step
+    """
+    import imageio
+    
+    num_actions = len(executed_actions)
+    num_flow_steps = len(executed_actions[0]) if num_actions > 0 else 0
+    
+    if num_actions == 0:
+        return
+    
+    # Interpolation settings
+    interpolation_frames = 10 #60  # Frames between each flow step
+    hold_frames = 3 #20  # Frames to hold at each step before moving
+    fps = VIDEO_FPS
+    
+    fig, ax = plt.subplots(figsize=VIDEO_FIGSIZE, dpi=VIDEO_DPI)
+    frames = []
+    
+    for step_idx in range(num_flow_steps - 1):
+        # Hold at current step
+        for _ in range(hold_frames):
+            ax.clear()
+            ax.set_xlim(x_lim)
+            ax.set_ylim(y_lim)
+            ax.invert_yaxis()  # Origin at top-left
+            ax.set_xlabel('Action Dimension 1', fontsize=12)
+            ax.set_ylabel('Action Dimension 2', fontsize=12)
+            ax.grid(True, alpha=0.3)
+            ax.set_title(f'Action Flow Evolution - {flow_step_names[step_idx]}', fontsize=14)
+            
+            for action_idx, action_history in enumerate(executed_actions):
+                x = action_history[step_idx][0]
+                y = action_history[step_idx][1]
+                ax.scatter(x, y, c=[colors[action_idx]], s=50,
+                          edgecolors='black', linewidth=0.5)
+            
+            # Draw trajectory
+            if num_actions > 1:
+                xs = [ah[step_idx][0] for ah in executed_actions]
+                ys = [ah[step_idx][1] for ah in executed_actions]
+                ax.plot(xs, ys, 'k-', alpha=0.2, linewidth=0.5)
+            
+            fig.canvas.draw()
+            img = np.asarray(fig.canvas.buffer_rgba())
+            img = img[:, :, :3]  # Drop alpha channel
+            frames.append(img.copy())
+        
+        # Interpolate to next step
+        for interp_frame in range(interpolation_frames):
+            t = interp_frame / interpolation_frames  # 0 to 1
+            # Smooth easing function (ease in-out)
+            t_smooth = t * t * (3 - 2 * t)
+            
+            ax.clear()
+            ax.set_xlim(x_lim)
+            ax.set_ylim(y_lim)
+            ax.invert_yaxis()  # Origin at top-left
+            ax.set_xlabel('Action Dimension 1', fontsize=12)
+            ax.set_ylabel('Action Dimension 2', fontsize=12)
+            ax.grid(True, alpha=0.3)
+            
+            # Interpolate title
+            progress_pct = int(t * 100)
+            ax.set_title(f'Transitioning: {flow_step_names[step_idx]} → {flow_step_names[step_idx + 1]} ({progress_pct}%)', fontsize=14)
+            
+            # Plot interpolated positions
+            interp_xs = []
+            interp_ys = []
+            for action_idx, action_history in enumerate(executed_actions):
+                x_start = action_history[step_idx][0]
+                y_start = action_history[step_idx][1]
+                x_end = action_history[step_idx + 1][0]
+                y_end = action_history[step_idx + 1][1]
+                
+                x_interp = x_start + t_smooth * (x_end - x_start)
+                y_interp = y_start + t_smooth * (y_end - y_start)
+                
+                interp_xs.append(x_interp)
+                interp_ys.append(y_interp)
+                
+                ax.scatter(x_interp, y_interp, c=[colors[action_idx]], s=50,
+                          edgecolors='black', linewidth=0.5)
+            
+            # Draw trajectory
+            if num_actions > 1:
+                ax.plot(interp_xs, interp_ys, 'k-', alpha=0.2, linewidth=0.5)
+            
+            fig.canvas.draw()
+            img = np.asarray(fig.canvas.buffer_rgba())
+            img = img[:, :, :3]  # Drop alpha channel
+            frames.append(img.copy())
+    
+    # Hold at final step
+    for _ in range(hold_frames * 2):  # Hold longer at final
+        ax.clear()
+        ax.set_xlim(x_lim)
+        ax.set_ylim(y_lim)
+        ax.invert_yaxis()  # Origin at top-left
+        ax.set_xlabel('Action Dimension 1', fontsize=12)
+        ax.set_ylabel('Action Dimension 2', fontsize=12)
+        ax.grid(True, alpha=0.3)
+        ax.set_title(f'Action Flow Evolution - {flow_step_names[-1]} (Final)', fontsize=14)
+        
+        for action_idx, action_history in enumerate(executed_actions):
+            x = action_history[-1][0]
+            y = action_history[-1][1]
+            ax.scatter(x, y, c=[colors[action_idx]], s=50,
+                      edgecolors='black', linewidth=0.5)
+        
+        if num_actions > 1:
+            xs = [ah[-1][0] for ah in executed_actions]
+            ys = [ah[-1][1] for ah in executed_actions]
+            ax.plot(xs, ys, 'k-', alpha=0.2, linewidth=0.5)
+        
+        fig.canvas.draw()
+        img = np.asarray(fig.canvas.buffer_rgba())
+        img = img[:, :, :3]  # Drop alpha channel
+        frames.append(img.copy())
+    
+    plt.close(fig)
+    
+    # Save as MP4
+    writer = imageio.get_writer('action_flow_smooth.mp4', format='FFMPEG', fps=fps, codec='libx264', pixelformat='yuv420p')
+    for frame in frames:
+        writer.append_data(frame)
+    writer.close()
+    print("Smooth interpolated MP4 saved to action_flow_smooth.mp4")
 
 
 def create_static_comparison(executed_actions, colors, flow_step_names):
@@ -449,6 +781,7 @@ def create_static_comparison(executed_actions, colors, flow_step_names):
     for step_idx, ax in enumerate(axes):
         ax.set_xlim(x_lim)
         ax.set_ylim(y_lim)
+        ax.invert_yaxis()  # Origin at top-left
         ax.set_title(flow_step_names[step_idx], fontsize=12)
         ax.set_xlabel('Action Dim 1')
         ax.set_ylabel('Action Dim 2')
@@ -457,7 +790,7 @@ def create_static_comparison(executed_actions, colors, flow_step_names):
         for action_idx, action_history in enumerate(executed_actions):
             x = action_history[step_idx][0]
             y = action_history[step_idx][1]
-            ax.scatter(x, y, c=[colors[action_idx]], s=30, alpha=0.7,
+            ax.scatter(x, y, c=[colors[action_idx]], s=30,
                       edgecolors='black', linewidth=0.3)
         
         # Draw trajectory
