@@ -1,0 +1,4 @@
+metric,max_value,best_max_steps,best_timehorizon
+avg_reward,0.6629596797167375,300,8
+best_reward,1.0,300,2
+std_reward,0.4632161969969266,500,5
