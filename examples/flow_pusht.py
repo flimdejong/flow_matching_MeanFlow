@@ -215,7 +215,7 @@ def test(max_steps=200, timehorizon=4, save_videos=True):
         seed = test_start_seed + epoch
         env.seed(seed)
 
-        for pp in range(10):
+        for pp in range(3):
             obs, info = env.reset()
             obs_deque = collections.deque(
                 [obs] * obs_horizon, maxlen=obs_horizon)
@@ -330,11 +330,11 @@ def test(max_steps=200, timehorizon=4, save_videos=True):
         writer.close()
         print("Best video saved to vis_best.mp4")
         
-        # # Create overlay video with action points on environment frames
-        # create_overlay_video(best_imgs, best_action_dist_episode, action_horizon, obs_horizon)
+        # Create overlay video with action points on environment frames
+        create_overlay_video(best_imgs, best_action_dist_episode, action_horizon, obs_horizon)
         
-        # # Process and visualize action distributions for best episode
-        # visualize_action_flow(best_action_dist_episode, action_horizon, obs_horizon)
+        # Process and visualize action distributions for best episode
+        visualize_action_flow(best_action_dist_episode, action_horizon, obs_horizon)
     
     return {
         'max_steps': max_steps,
@@ -567,8 +567,10 @@ def create_flow_animation(executed_actions):
     x_lim = (min(all_x) - x_margin, max(all_x) + x_margin)
     y_lim = (min(all_y) - y_margin, max(all_y) + y_margin)
     
-    flow_step_names = ['Noise', 'Flow Step 1', 'Flow Step 2', 'Flow Step 3']
-    
+    # Dynamically create flow step names according to the actual number of steps.
+    # The first step is 'Noise', subsequent steps are 'Flow Step 1', 'Flow Step 2', ...
+    flow_step_names = ['Noise'] + [f'Flow Step {i}' for i in range(1, num_flow_steps)]
+
     def init():
         ax.set_xlim(x_lim)
         ax.set_ylim(y_lim)
@@ -784,9 +786,17 @@ def create_smooth_flow_animation(executed_actions, colors, x_lim, y_lim, flow_st
 def create_static_comparison(executed_actions, colors, flow_step_names):
     """Create a static plot showing all flow steps side by side."""
     num_flow_steps = len(executed_actions[0])
-    
-    fig, axes = plt.subplots(1, num_flow_steps, figsize=(5 * num_flow_steps, 5))
-    
+    if num_flow_steps == 0:
+        print("No flow steps to plot")
+        return
+
+    # Layout: n rows x 4 columns (grid structure n*4)
+    cols = 4
+    rows = (num_flow_steps + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 5 * rows))
+    # flatten axes for easy indexing
+    axes = np.array(axes).reshape(-1)
+
     # Get consistent axis limits
     all_x = []
     all_y = []
@@ -800,7 +810,12 @@ def create_static_comparison(executed_actions, colors, flow_step_names):
     x_lim = (min(all_x) - x_margin, max(all_x) + x_margin)
     y_lim = (min(all_y) - y_margin, max(all_y) + y_margin)
     
-    for step_idx, ax in enumerate(axes):
+    for idx in range(rows * cols):
+        ax = axes[idx]
+        if idx >= num_flow_steps:
+            ax.axis('off')  # hide unused subplots
+            continue
+        step_idx = idx
         ax.set_xlim(x_lim)
         ax.set_ylim(y_lim)
         ax.invert_yaxis()  # Origin at top-left
