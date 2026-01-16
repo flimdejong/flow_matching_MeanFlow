@@ -24,7 +24,8 @@ Training and evaluation examples of using flow matching on PushT and Franka Kitc
 🌷 **Getting Started**
 1. Clone this repo and change into it: `git clone git@github.com:HRI-EU/flow-matching-policy.git && cd flow_matching` \
 2. Install the Python dependencies: `python -m venv venv_fm && source venv_fm/bin/activate && pip install --no-cache-dir -r requirements.txt`
-3. Enjoy!
+3. manually install pip install dm_control==1.0.12 --no-deps
+4. Enjoy!
 
 <!--* Tulip variations with access to a tool library
   * `MinimalTulipAgent`: Minimal implementation; searches for tools based on the user input directly

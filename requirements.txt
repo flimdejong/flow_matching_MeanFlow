@@ -31,3 +31,7 @@ mako
 lxml
 terminaltables
 pylint>=2.9
+imageio[ffmpeg]
+einops
+numba
+mujoco==2.1.2

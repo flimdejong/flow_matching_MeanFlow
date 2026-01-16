@@ -122,6 +122,8 @@ FM = ConditionalFlowMatcher(sigma=sigma)
 avg_loss_train_list = []
 avg_loss_val_list = []
 
+
+'''
 ########################################################################
 #### Train the model
 for epoch in range(num_epochs):
@@ -162,18 +164,22 @@ for epoch in range(num_epochs):
         ema.restore(noise_pred_net.parameters())
 
 sys.exit(0)
+'''
 
 ##################################################################
 ###### test the model
-PATH = './flow_ema_04500.pth'
-state_dict = torch.load(PATH, map_location='cuda')
+#PATH = './flow_ema_04500.pth'
+PATH = './kitchen/flow_kitchen.pth'
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+state_dict = torch.load(PATH, map_location=device)
 noise_pred_net.load_state_dict(state_dict['noise_pred_net'])
 
 max_steps = 280
 env = KitchenAllV0(use_abs_action=False)
 
 test_start_seed = 10000
-n_test = 500
+n_test = 500 # original
+n_test = 1
 
 ###### please choose the seed you want to test
 for epoch in range(n_test):
